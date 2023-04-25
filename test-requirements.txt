@@ -1,0 +1,1 @@
+odoo-addon-stock_helper @ git+https://github.com/OCA/stock-logistics-warehouse.git@refs/pull/1697/head#subdirectory=setup/stock_helper
