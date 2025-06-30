@@ -490,9 +490,11 @@ class StockLocationOrderpoint(models.Model):
         )
         for moves_chunk in split_every(100, moves_to_assign.ids):
             self.env["stock.move"].browse(moves_chunk)._action_assign()
+        return moves_to_assign
 
     def _after_replenishment(self):
-        self._assign_replenishment_moves()
+        """Assigns replenishment moves and return them."""
+        return self._assign_replenishment_moves()
 
     def _prepare_orderpoint_domain_location(self, location_ids, location_field=False):
         """
