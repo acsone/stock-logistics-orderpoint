@@ -99,6 +99,11 @@ Location Orderpoint configuration
    to avoid confirmed receptions taken into account), fill in the 
    'Domain to filter locations' field.
 
+When different orderpoints are defined on the same location, it could result in the creation of several
+replenishment moves for the same product. When this happens, if the moves are merged together, the
+resulting move will be linked to the orderpoint with the highest priority, ensuring that the move 
+inherits the correct priority and is processed accordingly.
+
 Bug Tracker
 ===========
 
@@ -117,6 +122,7 @@ Authors
 
 * MT Software
 * BCIM
+* ACSONE SA/NV
 
 Contributors
 ~~~~~~~~~~~~
@@ -124,6 +130,8 @@ Contributors
 * Michael Tietz (MT Software) <mtietz@mt-software.de>
 * Jacques-Etienne Baudoux (BCIM) <je@bcim.be>
 * Denis Roussel <denis.roussel@acsone.eu>
+* Nicolas Delbovier <nicolas.delbovier@acsone.eu>
+* Laurent Mignon <laurent.mignon@acsone.eu>
 
 Maintainers
 ~~~~~~~~~~~
@@ -141,10 +149,13 @@ promote its widespread use.
 .. |maintainer-mt-software-de| image:: https://github.com/mt-software-de.png?size=40px
     :target: https://github.com/mt-software-de
     :alt: mt-software-de
+.. |maintainer-lmignon| image:: https://github.com/lmignon.png?size=40px
+    :target: https://github.com/lmignon
+    :alt: lmignon
 
-Current `maintainer <https://odoo-community.org/page/maintainer-role>`__:
+Current `maintainers <https://odoo-community.org/page/maintainer-role>`__:
 
-|maintainer-mt-software-de| 
+|maintainer-mt-software-de| |maintainer-lmignon| 
 
 This module is part of the `OCA/stock-logistics-orderpoint <https://github.com/OCA/stock-logistics-orderpoint/tree/16.0/stock_location_orderpoint>`_ project on GitHub.
 
