@@ -110,11 +110,11 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
         self.assertEqual(orderpoint.last_cron_execution, day_after_tomorrow)
 
     def test_auto_replenishment(self):
-        job_func = self.env["stock.location.orderpoint"].run_auto_replenishment
+        job_func = self.env["stock.location.orderpoint"].run_replenishment
         move_qty = 12
         with trap_jobs() as trap:
             move = self._create_outgoing_move(move_qty)
-            trap.assert_jobs_count(0, only=job_func)
+            trap.assert_jobs_count(0)
             trap.perform_enqueued_jobs()
             replenish_move = self.env["stock.move"].search(
                 [
@@ -127,12 +127,13 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
         orderpoint, location_src = self._create_orderpoint_complete(
             "Stock2", trigger="auto"
         )
+        job_func = orderpoint.run_replenishment
         with trap_jobs() as trap:
             move = self._create_outgoing_move(move_qty)
             trap.assert_jobs_count(1, only=job_func)
             trap.assert_enqueued_job(
-                orderpoint.browse([]).run_auto_replenishment,
-                args=(move.product_id, move.location_id, "location_id"),
+                orderpoint.run_replenishment,
+                args=(move.product_id,),
                 kwargs={},
                 properties=dict(
                     identity_key=identity_exact,
@@ -147,8 +148,8 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
             move = self._create_incoming_move(move_qty, location_src)
             trap.assert_jobs_count(1, only=job_func)
             trap.assert_enqueued_job(
-                orderpoint.browse([]).run_auto_replenishment,
-                args=(move.product_id, move.location_dest_id, "location_src_id"),
+                orderpoint.run_replenishment,
+                args=(move.product_id,),
                 kwargs={},
                 properties=dict(
                     identity_key=identity_exact,
@@ -165,8 +166,8 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
             move = self._create_outgoing_move(move_qty)
             trap.assert_jobs_count(1, only=job_func)
             trap.assert_enqueued_job(
-                orderpoint.browse([]).run_auto_replenishment,
-                args=(move.product_id, move.location_id, "location_id"),
+                orderpoint.run_replenishment,
+                args=(move.product_id,),
                 kwargs={},
                 properties=dict(
                     identity_key=identity_exact,
@@ -183,19 +184,19 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
         Check that the channel for enqueud job is
         root.stock_location_orderpoint_auto_replenishment
         """
-        job_func = self.env["stock.location.orderpoint"].run_auto_replenishment
         move_qty = 12
 
         orderpoint, location_src = self._create_orderpoint_complete(
             "Stock2",
             trigger="auto",
         )
+        job_func = orderpoint.run_replenishment
         with trap_jobs() as trap:
             move = self._create_outgoing_move(move_qty)
             trap.assert_jobs_count(1, only=job_func)
             trap.assert_enqueued_job(
-                orderpoint.browse([]).run_auto_replenishment,
-                args=(move.product_id, move.location_id, "location_id"),
+                job_func,
+                args=(move.product_id,),
                 kwargs={},
                 properties=dict(
                     identity_key=identity_exact,
@@ -210,8 +211,8 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
             move = self._create_incoming_move(move_qty, location_src)
             trap.assert_jobs_count(1, only=job_func)
             trap.assert_enqueued_job(
-                orderpoint.browse([]).run_auto_replenishment,
-                args=(move.product_id, move.location_dest_id, "location_src_id"),
+                job_func,
+                args=(move.product_id,),
                 kwargs={},
                 properties=dict(
                     identity_key=identity_exact,

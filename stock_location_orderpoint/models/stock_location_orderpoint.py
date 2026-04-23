@@ -2,14 +2,16 @@
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 from collections import defaultdict
 from copy import copy
-from datetime import timedelta
 
 from odoo import _, api, fields, models, tools
 from odoo.exceptions import ValidationError
 from odoo.osv import expression
-from odoo.tools import float_compare, split_every
+from odoo.tools import split_every
 
 from odoo.addons.stock.models.stock_move import PROCUREMENT_PRIORITIES
+
+from .stock_location_orderpoint_strategy import StockLocationOrderpointStrategy
+from .tools import MovesTouchTracker
 
 
 class StockLocationOrderpoint(models.Model):
@@ -100,6 +102,10 @@ class StockLocationOrderpoint(models.Model):
         )
     ]
 
+    # -------------------------------------------------------------------------
+    # Validation and computed fields
+    # -------------------------------------------------------------------------
+
     @api.constrains("location_id", "route_id")
     def _check_location_id_route_id(self):
         for orderpoint in self:
@@ -131,400 +137,13 @@ class StockLocationOrderpoint(models.Model):
                 )
             orderpoint.location_src_id = location
 
-    def _prepare_procurement(self, product, qty, date_planned, proc_vals):
-        self.ensure_one()
-        proc_vals = copy(proc_vals)
-        proc_vals.update(
-            {
-                "date_planned": date_planned or fields.Datetime.now(),
-            }
-        )
-        return self.env["procurement.group"].Procurement(
-            product,
-            qty,
-            product.uom_id,
-            self.location_id,
-            self.name,
-            self.name,
-            self.company_id,
-            proc_vals,
-        )
+    # -------------------------------------------------------------------------
+    # Orderpoint selection and domains
+    # -------------------------------------------------------------------------
 
-    def _prepare_procurement_values(self):
-        self.ensure_one()
-        return {
-            "route_ids": self.route_id,
-            "date_deadline": False,
-            "warehouse_id": self.location_id.warehouse_id,
-            "group_id": self.group_id,
-            "priority": self.priority or "0",
-            "location_orderpoint_id": self.id,
-        }
-
-    def _get_group_by_domain_config(self):
-        """Returns a list of orederpoints fields for which orderpoints
-        with the same value will generate the same domain for the moves
-        The location_id should be excluded. The location domain will be applied
-        to each group of orderpoints.
-        """
-        return ["last_cron_execution", "trigger", "replenish_method"]
-
-    def _group_by_domain_config(self):
-        """Returns an iterator of orderpoints for which the values of the fields
-        returned by _get_group_by_domain_config will be the same.
-        """
-        groups = defaultdict(list)
-        for orderpoint in self:
-            group_key = tuple(
-                getattr(orderpoint, field)
-                for field in orderpoint._get_group_by_domain_config()
-            )
-            groups[group_key].append(orderpoint.id)
-        for group in groups.values():
-            yield self.browse(group)
-
-    def _get_consuming_moves_domain_for_group(self):
-        """Returns a domain which selects moves the outgoings that could
-        introduce a shortage at the location for a list of orderpoints
-        with the same characteristics except the location_id
-        """
-        first = self[0]
-        domain = []
-        if first.trigger == "cron":
-            if not first.last_cron_execution:
-                # initialize a date 1 week ago to avoid selecting all moves
-                # when the cron is executed for the first time
-                first.last_cron_execution = self.env.cr.now() - timedelta(days=7)
-            domain.append(("date", ">=", first.last_cron_execution))
-        if first.replenish_method == "fill_up":
-            # with fillup, we know that a replenishment is required when
-            # move are waiting availability
-            domain.append(("state", "in", ["confirmed", "partially_available"]))
-        return domain
-
-    def _get_consuming_moves_domain(self):
-        """Returns a domain which selects moves the outgoings that could
-        introduce a shortage at the location"""
-        domain = [
-            ("move_orig_ids", "=", False),
-            ("procure_method", "=", "make_to_stock"),
-        ]
-        if self:
-            domain.append(("location_id", "child_of", self.location_id.ids))
-        groups = []
-        for orderpoints in self._group_by_domain_config():
-            group_domain = orderpoints._get_consuming_moves_domain_for_group()
-            if group_domain:
-                groups.append(group_domain)
-        if not groups:
-            return domain
-        return expression.AND([domain, expression.OR(groups)])
-
-    def _get_replenishment_moves_domain_for_group(self):
-        """Returns a domain which selects the incomig moves that could
-        allow a replenishment at the location for a list of orderpoints
-        with the same characteristics except the location_id
-        """
-        first = self[0]
-        domain = []
-        if first.trigger == "cron":
-            if not first.last_cron_execution:
-                # initialize a date 1 week ago to avoid selecting all moves
-                # when the cron is executed for the first time
-                first.last_cron_execution = self.env.cr.now() - timedelta(days=7)
-            domain.append(("date", ">=", first.last_cron_execution))
-        return domain
-
-    def _get_replenishment_moves_domain(self):
-        """Returns a domain which selects moves that could replenish
-        the location"""
-        domain = [
-            ("move_dest_ids", "=", False),
-            ("procure_method", "=", "make_to_stock"),
-            ("state", "=", "done"),
-        ]
-        if self:
-            domain.append(("location_dest_id", "child_of", self.location_src_id.ids))
-        groups = []
-        for orderpoints in self._group_by_domain_config():
-            group_domain = orderpoints._get_replenishment_moves_domain_for_group()
-            if group_domain:
-                groups.append(group_domain)
-        if not groups:
-            return domain
-        return expression.AND([domain, expression.OR(groups)])
-
-    @api.model
-    @tools.ormcache("ids")
-    def _get_consuming_moves_domain_for_ids(self, ids=None):
-        """
-
-        Returns a domain which selects moves the outgoings that could
-        introduce a shortage at the location for a list of orderpoints
-
-        :param frozenset() ids: The orderpoint ids
-        """
-        if ids is not None:
-            ids = list(ids)
-        orderpoints = self.browse(ids) if ids else self.search([])
-        return orderpoints._get_consuming_moves_domain()
-
-    @api.model
-    @tools.ormcache("ids")
-    def _get_replenishment_moves_domain_for_ids(self, ids=None):
-        """
-
-        Returns a domain which selects moves that could replenish
-        the location for a list of orderpoints
-
-        :param frozenset() ids: The orderpoint ids
-        """
-        if ids is not None:
-            ids = list(ids)
-        orderpoints = self.browse(ids) if ids else self.search([])
-        return orderpoints._get_replenishment_moves_domain()
-
-    @api.model
-    def _get_moves_domain(self, ids):
-        """
-        Returns a domain which selects moves replenishing or consuming
-        the locations of orderpoints with given ids
-        """
-        ids = frozenset(ids)
-        return expression.OR(
-            [
-                self._get_replenishment_moves_domain_for_ids(ids),
-                self._get_consuming_moves_domain_for_ids(ids),
-            ]
-        )
-
-    def _find_potential_moves_to_replenish_by_location(self, products=False):
-        """Return a dictionary of products per location that potentially require a replenishment
-        based on the fact there are moves not reserved for those products.
-        This reduces the list of products for which the quantity will be computed"""
-        # We don't use the _get_moves_domain method because. We prefer to make
-        # 2 queries instead of 1 with a big OR statement because the query
-        # planner is not able to use the indexes properly
-        location_ids = []
-        domains = [
-            self._get_replenishment_moves_domain_for_ids(frozenset(self.ids)),
-            self._get_consuming_moves_domain_for_ids(frozenset(self.ids)),
-        ]
-        result = {}
-        for domain in domains:
-            if products:
-                domain = expression.AND([domain, [("product_id", "in", products.ids)]])
-            moves_grouped = self.env["stock.move"].read_group(
-                domain,
-                ["ids:array_agg(id)", "location_id"],
-                "location_id",
-                orderby="id",
-            )
-            for res in moves_grouped:
-                location_ids.append(res["location_id"][0])
-                result.setdefault(res["location_id"][0], []).extend(res["ids"])
-        return {
-            self.env["stock.location"]
-            .browse(location_ids): self.env["stock.move"]
-            .browse(mode_ids)
-            for location_ids, mode_ids in result.items()
-        }
-
-    def _sort_orderpoints(self):
-        return self.sorted()
-
-    @api.model
-    def _compute_quantities_dict(self, locations, products):
-        qties = {}
-        for location in locations:
-            qties_on_location = qties.setdefault(location, {})
-            products = products.with_context(location=location.id)
-            for product_id, qties_dict in products._compute_quantities_dict(
-                None, None, None
-            ).items():
-                product = products.browse(product_id)
-                qties_on_location[product] = qties_dict
-        return qties
-
-    def _get_qty_to_replenish(
-        self, product, qties_on_locations, qty_already_replenished=0
+    def _prepare_orderpoint_domain_location(
+        self, location_ids, location_field="location_id"
     ):
-        """
-        Returns a qty to replenish for a given orderpoint and product
-        """
-        self.ensure_one()
-        product.ensure_one()
-
-        if self.replenish_method == "fill_up":
-            return self._get_qty_to_replenish_fill_up(
-                product, qties_on_locations, qty_already_replenished
-            )
-        return 0
-
-    def _get_qty_to_replenish_fill_up(
-        self, product, qties_on_locations, qty_already_replenished=0
-    ):
-        if not self.location_src_id:
-            return 0
-
-        qties_on_dest = qties_on_locations[self.location_id][product]
-        virtual_available_on_dest = qties_on_dest["virtual_available"]
-        if (
-            float_compare(
-                virtual_available_on_dest,
-                0,
-                precision_rounding=product.uom_id.rounding,
-            )
-            >= 0
-        ):
-            return 0
-
-        virtual_available_on_dest = abs(virtual_available_on_dest)
-        qties_on_src = qties_on_locations[self.location_src_id][product]
-        virtual_available_on_src = (
-            qties_on_src["virtual_available"] - qties_on_src["incoming_qty"]
-        )
-        if (
-            float_compare(
-                virtual_available_on_src,
-                0,
-                precision_rounding=product.uom_id.rounding,
-            )
-            <= 0
-        ):
-            return 0
-
-        qty_to_replenish = virtual_available_on_dest - qty_already_replenished
-        return min(qty_to_replenish, virtual_available_on_src)
-
-    def _get_qties_to_replenish(self, moves_by_location):
-        products = set()
-        for moves in moves_by_location.values():
-            products.update(moves.product_id.ids)
-        qties_replenished = defaultdict(lambda: defaultdict(lambda: 0))
-        qties_to_replenish = defaultdict(list)
-        for orderpoint in self:
-            qties_on_locations = self._compute_quantities_dict(
-                (self.location_id | self.location_src_id),
-                self.env["product.product"]
-                .browse(products)
-                .with_context(
-                    excluded_location_domain=orderpoint.stock_excluded_location_domain
-                ),
-            )
-            if orderpoint.location_id not in moves_by_location:
-                continue
-
-            for product in moves_by_location[orderpoint.location_id].product_id:
-                qties_replenished_for_location = qties_replenished[
-                    orderpoint.location_id
-                ]
-                qty_to_replenish = orderpoint._get_qty_to_replenish(
-                    product,
-                    qties_on_locations,
-                    qties_replenished_for_location[product],
-                )
-                if (
-                    float_compare(
-                        qty_to_replenish,
-                        0,
-                        precision_rounding=product.uom_id.rounding,
-                    )
-                    > 0
-                ):
-                    qties_to_replenish[orderpoint].append((product, qty_to_replenish))
-                    qties_replenished_for_location[product] += qty_to_replenish
-        return qties_to_replenish
-
-    def __prepare_procurements(self, moves_by_location):
-        qties_to_replenish_by_orderpoint = self._get_qties_to_replenish(
-            moves_by_location
-        )
-        procurements = []
-        for (
-            orderpoint,
-            qties_to_replenish,
-        ) in qties_to_replenish_by_orderpoint.items():
-            proc_vals = orderpoint._prepare_procurement_values()
-            for product, qty in qties_to_replenish:
-                date_planned = moves_by_location[
-                    orderpoint.location_id
-                ]._get_location_orderpoint_replenishment_date(product)
-                procurements.append(
-                    orderpoint._prepare_procurement(
-                        product, qty, date_planned, proc_vals
-                    )
-                )
-        return procurements
-
-    def _prepare_procurements(self, products=False):
-        moves_by_location = self._find_potential_moves_to_replenish_by_location(
-            products
-        )
-        return self._sort_orderpoints().__prepare_procurements(moves_by_location)
-
-    def run_replenishment(self, products=False):
-        """Run the replenishment for all potential products or only a selection"""
-        procurements = self._prepare_procurements(products)
-        if procurements:
-            self.env["procurement.group"].with_context(from_orderpoint=True).run(
-                procurements, raise_user_error=False
-            )
-        replenishment_moves = self._get_current_replenishment_moves(products)
-        self._after_replenishment(replenishment_moves)
-        return replenishment_moves
-
-    def _get_current_replenishment_moves(self, products=False):
-        """
-        Returns ongoing replenishment moves created or updated by the
-        given orderpoints.
-        """
-        domain = [
-            ("state", "in", ["confirmed", "partially_available", "assigned"]),
-            ("procure_method", "=", "make_to_stock"),
-            ("location_orderpoint_id", "in", self.ids),
-        ]
-        if products:
-            domain = expression.AND([domain, [("product_id", "in", products.ids)]])
-        return self.env["stock.move"].search(
-            domain, order="priority desc, date asc, id asc"
-        )
-
-    def _assign_replenishment_moves(self, moves_to_assign):
-        """Assigns moves created by the orderpoints"""
-        for moves_chunk in split_every(100, moves_to_assign.ids):
-            self.env["stock.move"].browse(moves_chunk)._action_assign()
-        return moves_to_assign
-
-    def _after_replenishment(self, replenishment_moves):
-        """
-        Assigns generated replenishment moves.
-        """
-        self._assign_replenishment_moves(
-            replenishment_moves.filtered(lambda m: m.state != "assigned")
-        )
-        picking_priority_to_update = self.env["stock.picking"]
-        for move in replenishment_moves.sudo():
-            new_priority = move.location_orderpoint_id.priority
-            if move.priority != new_priority:
-                move.priority = new_priority
-                picking_priority_to_update |= move.picking_id
-        for picking in picking_priority_to_update:
-            new_priority = max(
-                picking.move_ids.filtered(lambda m: m.state != "cancel").mapped(
-                    "priority"
-                )
-            )
-            if picking.priority != new_priority:
-                # we want to avoid to override the individual move priority by the
-                # picking priority, so we protect the priority field on the
-                # picking's moves
-                with self.env.protecting(
-                    [self.env["stock.move"]._fields["priority"]], picking.move_ids
-                ):
-                    picking.priority = new_priority
-
-    def _prepare_orderpoint_domain_location(self, location_ids, location_field=False):
         """
         Returns the domain part of the location selection of _get_orderpoints
         :param list int location_ids: list of stock.location ids
@@ -535,11 +154,11 @@ class StockLocationOrderpoint(models.Model):
         if not isinstance(ids, list):
             ids = ids.ids
 
-        location_field = not location_field and "location_id" or location_field
+        location_field = location_field or "location_id"
         return [(location_field, "parent_of", ids)]
 
     def _prepare_orderpoint_domain(
-        self, trigger, locations=False, location_field=False
+        self, trigger, locations=None, location_field="location_id"
     ):
         """Returns the domain for _get_orderpoints"""
         domain = [("trigger", "=", trigger)]
@@ -569,7 +188,7 @@ class StockLocationOrderpoint(models.Model):
         return result
 
     @api.model
-    def _get_orderpoints(self, trigger, locations=False, location_field="location_id"):
+    def _get_orderpoints(self, trigger, locations=None, location_field="location_id"):
         """Returns orderpoints selected by trigger, locations and location_field"""
         ids_by_parent_paths = self._get_ids_by_parent_path(trigger, location_field)
         ids = set()
@@ -581,39 +200,157 @@ class StockLocationOrderpoint(models.Model):
         else:
             # ids_by_parent_paths.values() is a list of ids. We need to flatten it
             ids = set().union(*ids_by_parent_paths.values())
-        return self.browse(list(ids))
-
-    def _is_location_parent_of(self, location, location_field):
-        """
-        Checks if one location of the given orderpoints
-        is a parent of the given location
-
-        :param location: browse record of stock.location
-        :param location_field: should be location_id or location_src_id
-            orderpoints location field to check against
-        """
-        for parent_location in getattr(self, location_field):
-            if location.parent_path.startswith(parent_location.parent_path):
-                return True
+        return self.browse(list(ids)).sorted()
 
     @api.model
-    def _filter_moves_triggering_orderpoints(self, moves, trigger="auto"):
-        """Filters moves that trigger orderpoints"""
+    def _get_orderpoints_from_moves(self, moves, trigger="auto"):
+        """Return orderpoints impacted by the given move set."""
+        orderpoints = self._get_orderpoints(
+            trigger, locations=moves.location_id, location_field="location_id"
+        )
+        return orderpoints | self._get_orderpoints(
+            trigger, locations=moves.location_dest_id, location_field="location_src_id"
+        )
+
+    @api.model
+    @tools.ormcache("orderpoint_id")
+    def _get_consuming_moves_domain(self, orderpoint_id):
+        (
+            _q,
+            _il,
+            domain_move_out_loc,
+        ) = self._get_dest_domains(orderpoint_id)
+        domain = [
+            ("state", "in", ("waiting", "confirmed", "partially_available")),
+        ]
+        return expression.AND([domain_move_out_loc, domain])
+
+    @api.model
+    @tools.ormcache("orderpoint_id")
+    def _get_supplying_moves_domain(self, orderpoint_id):
+        self.browse(orderpoint_id)
+        (
+            _q,
+            domain_move_in_loc,
+            _ol,
+        ) = self._get_src_domains(orderpoint_id)
+        domain = [
+            ("state", "=", "done"),
+        ]
+        return expression.AND([domain_move_in_loc, domain])
+
+    @api.model
+    def _collect_products_by_orderpoint(self, moves, orderpoints, get_domain):
+        """Group impacted products by orderpoint using a domain provider."""
+        products_by_orderpoint = defaultdict(self.env["product.product"].browse)
+        for orderpoint in orderpoints:
+            moves_for_orderpoint = moves.filtered_domain(get_domain(orderpoint.id))
+            if not moves_for_orderpoint:
+                continue
+            products_by_orderpoint[orderpoint] |= moves_for_orderpoint.mapped(
+                "product_id"
+            )
+        return products_by_orderpoint
+
+    @api.model
+    def _get_from_move_demand(self, moves, trigger="auto"):
+        """
+        Return a dict of products by orderpoint to replenish the demand
+        generated by the given moves. (The given moves are consuming the
+        orderpoint location).
+        :param moves: stock.move recordset
+        :param trigger: the trigger to consider to select the orderpoints to replenish
+        :return: dict {orderpoint: products}
+        """
         # move from location consume order point location -> DO I've to replenish?
         orderpoints = self._get_orderpoints(
             trigger, locations=moves.location_id, location_field="location_id"
         )
+        return self._collect_products_by_orderpoint(
+            moves, orderpoints, self._get_consuming_moves_domain
+        )
+
+    @api.model
+    def _get_from_move_supply(self, moves, trigger="auto"):
+        """
+        Return a dict of products by orderpoint to replenish the demand
+        generated by the given moves. (The given moves are supplying the
+        orderpoint location).
+        :param moves: stock.move recordset
+        :param trigger: the trigger to consider to select the orderpoints to replenish
+        :return: dict {orderpoint: products}
+        """
         # move to src location replenish order point source location -> DO I've to replenish?
-        orderpoints = orderpoints | self._get_orderpoints(
+        orderpoints = self._get_orderpoints(
             trigger, locations=moves.location_dest_id, location_field="location_src_id"
         )
+        return self._collect_products_by_orderpoint(
+            moves, orderpoints, self._get_supplying_moves_domain
+        )
+
+    @api.model
+    def _filter_moves_triggering_orderpoints(self, moves, trigger="auto"):
+        """Filters moves that trigger orderpoints"""
+        orderpoints = self._get_orderpoints_from_moves(moves, trigger)
         if not orderpoints:
             return self.env["stock.move"]
         moves = moves.filtered_domain(self._get_moves_domain(orderpoints.ids))
         return moves
 
     @api.model
-    def run_auto_replenishment(self, products, locations, location_field=False):
+    @tools.ormcache("orderpoint_id")
+    def _get_src_domains(self, orderpoint_id):
+        """Get the quant, move in and move out domains
+        for the orderpoint location source and its children locations
+        """
+        orderpoint = self.browse(orderpoint_id)
+        return orderpoint._product_model._get_domain_locations_new(
+            [orderpoint.location_src_id.id]
+        )
+
+    @api.model
+    @tools.ormcache("orderpoint_id")
+    def _get_dest_domains(self, orderpoint_id):
+        """Get the quant, move in and move out domains
+        for the orderpoint location destination and its children locations
+        """
+        orderpoint = self.browse(orderpoint_id)
+        return orderpoint._product_model._get_domain_locations_new(
+            [orderpoint.location_id.id]
+        )
+
+    # -------------------------------------------------------------------------
+    # Context-aware model accessors
+    # -------------------------------------------------------------------------
+
+    @property
+    def _product_model(self):
+        """Returns the product model in the context of the orderpoint,
+        to be used to compute the quantities.
+        It ensures that the context includes the excluded location domain.
+        """
+        self.ensure_one()
+        return self.env["product.product"].with_context(
+            excluded_location_domain=self.stock_excluded_location_domain
+        )
+
+    @property
+    def _strategy_model(self) -> StockLocationOrderpointStrategy:
+        return self.env[f"stock.location.orderpoint.strategy.{self.replenish_method}"]
+
+    # -------------------------------------------------------------------------
+    # Public triggers and orchestration
+    # -------------------------------------------------------------------------
+
+    @api.model
+    def run_cron_replenishment(self, location_ids=None):
+        orderpoints = self._get_orderpoints(trigger="cron", locations=location_ids)
+        res = orderpoints.run_replenishment(products=False)
+        orderpoints.write({"last_cron_execution": self.env.cr.now()})
+        return res
+
+    @api.model
+    def run_auto_replenishment(self, products, locations, location_field="location_id"):
         """
         Run the replenishment for all given products
         Selects the right orderpoints by locations and location_field
@@ -624,22 +361,307 @@ class StockLocationOrderpoint(models.Model):
         """
         if not locations or not products:
             return
-        self = self._get_orderpoints("auto", locations, location_field)
-        self.run_replenishment(products)
+        orderpoints = self._get_orderpoints("auto", locations, location_field)
+        orderpoints.run_replenishment(products)
 
-    @api.model
-    def run_cron_replenishment(self, location_ids=False):
-        self = self._get_orderpoints("cron", location_ids)
-        self.run_replenishment()
-        # use the current transaction date to ensure that orderpoints run
-        # in the same transaction have the same last_cron_execution and are
-        # always grouped together
-        self.write({"last_cron_execution": self.env.cr.now()})
+    def run_replenishment(self, products=None):
+        """
+        Public entry point to execute the replenishment rule.
+
+        :param products: optional recordset of product.product
+            If provided, limits the computation scope.
+        """
+        result = self.env["stock.move"]
+        for rule in self:
+            result |= rule._run_replenishment(products=products)
+        return result
+
+    def _run_replenishment(self, products=None):
+        """
+        Internal pipeline:
+        1. determine candidate products
+        2. compute demand (strategy)
+        3. compute available quantities
+        4. compute delta
+        5. execute replenishment
+        """
+        result = self.env["stock.move"]
+        self.ensure_one()
+        products = self._get_candidate_products(products)
+        if not products and products is not None:
+            # an empty recordset means that we have computed
+            # that no product is concerned by the replenishment.
+            # otherise a None value means that we don't want
+            # to limit the scope of the computation
+            return result
+
+        products = self._with_excluded_location_context(products)
+
+        demand_data = self._compute_demand(products)
+        if not demand_data:
+            return result
+
+        # we filter the products to compute only the quantities
+        # for the products for which we have a demand.
+        products = self._product_model.browse(demand_data.keys())
+
+        qty_available_data = self._compute_available_quantities(products)
+
+        procurement_data = self._compute_procurement_qty(
+            demand_data, qty_available_data
+        )
+        if not procurement_data:
+            return result
+
+        procurements = self._build_procurements(procurement_data)
+        if not procurements:
+            return result
+
+        result = self._execute_procurements(procurements)
+        return self._after_replenishment(result)
+
+    def _with_excluded_location_context(self, products):
+        """Ensure product computations use orderpoint's excluded location domain."""
+        if products and "excluded_location_domain" not in products.env.context:
+            return products.with_context(
+                excluded_location_domain=self.stock_excluded_location_domain
+            )
+        return products
+
+    # -------------------------------------------------------------------------
+    # Replenishment computation pipeline
+    # -------------------------------------------------------------------------
+
+    def _build_procurements(self, procurement_data):
+        """Build procurement payload from computed quantities by product id."""
+        self.ensure_one()
+        procurement_vals = self._prepare_procurement_vals()
+        return [
+            self._prepare_procurement(
+                self.env["product.product"].browse(product_id),
+                procurement_qty,
+                date_planned=False,
+                proc_vals=procurement_vals,
+            )
+            for product_id, procurement_qty in procurement_data.items()
+        ]
+
+    def _get_candidate_products(self, products=None):
+        """
+        Resolve the product scope.
+
+        Priority:
+        1. explicit products
+        2. strategy override
+        3. default (rule-based #to be implemented if needed)
+
+        :return: product.product recordset
+        """
+        return products or self._strategy_model._get_candidate_products(self)
+
+    def _compute_demand(self, products):
+        """
+        Delegate to strategy.
+
+        :return: dict {product_id: demand_qty}
+        """
+        return self._strategy_model._compute_demand(self, products)
+
+    def _compute_available_quantities(self, products):
+        """
+        Compute available quantities for products at rule's source location.
+
+        :return: dict {product_id: qty_available}
+        """
+        quant_domain, _move_in_domain, move_out_domain = self._get_src_domains(self.id)
+        if len(products) < 500:
+            # in query is too expensive with a large number of products,
+            #  so we avoid it when possible.
+            quant_domain = expression.AND(
+                [quant_domain, [("product_id", "in", products.ids)]]
+            )
+            move_out_domain = expression.AND(
+                [move_out_domain, [("product_id", "in", products.ids)]]
+            )
+        move_out_domain = expression.AND(
+            [
+                move_out_domain,
+                [
+                    (
+                        "state",
+                        "in",
+                        ("waiting", "confirmed", "assigned", "partially_available"),
+                    )
+                ],
+            ]
+        )
+        # --- STOCK MOVE (OUTGOING) ---
+
+        stock_move_obj = self.env["stock.move"]
+        stock_move_obj._flush_search(move_out_domain)
+        stock_move_obj.flush_model(["product_uom_qty"])
+
+        move_query = stock_move_obj._where_calc(move_out_domain)
+        stock_move_obj._apply_ir_rules(move_query, "read")
+
+        move_tables, move_where, move_params = move_query.get_sql()
+
+        move_sql = f"""
+            SELECT
+                {stock_move_obj._table}.product_id,
+                - SUM({stock_move_obj._table}.product_uom_qty) AS qty
+            FROM {move_tables}
+            WHERE {move_where}
+            GROUP BY {stock_move_obj._table}.product_id
+        """
+
+        # --- STOCK QUANT ---
+
+        stock_quant_obj = self.env["stock.quant"]
+        stock_quant_obj._flush_search(quant_domain)
+        stock_quant_obj.flush_model(["quantity"])
+
+        quant_query = stock_quant_obj._where_calc(quant_domain)
+        stock_quant_obj._apply_ir_rules(quant_query, "read")
+
+        quant_tables, quant_where, quant_params = quant_query.get_sql()
+
+        quant_sql = f"""
+            SELECT
+                {stock_quant_obj._table}.product_id,
+                SUM({stock_quant_obj._table}.quantity) AS qty
+            FROM {quant_tables}
+            WHERE {quant_where}
+            GROUP BY {stock_quant_obj._table}.product_id
+        """
+
+        # --- FINAL UNION ---
+
+        final_sql = f"""
+            SELECT product_id, SUM(qty) AS qty
+            FROM (
+                {move_sql}
+                UNION ALL
+                {quant_sql}
+            ) AS combined
+            GROUP BY product_id
+        """
+
+        params = move_params + quant_params
+
+        self.env.cr.execute(final_sql, params)
+        return dict(self.env.cr.fetchall())
+
+    def _compute_procurement_qty(self, demand_data, qty_available_data):
+        """
+        Merge demand and available quantities.
+
+        :return: dict {product_id: procurement_qty}
+        """
+        return {
+            product_id: min(
+                demand_data[product_id], qty_available_data.get(product_id, 0)
+            )
+            for product_id in demand_data
+        }
+
+    def _prepare_procurement_vals(self):
+        """
+        Prepare values for procurement creation.
+        """
+        self.ensure_one()
+        return {
+            "route_ids": self.route_id,
+            "date_deadline": False,
+            "warehouse_id": self.location_id.warehouse_id,
+            "group_id": self.group_id,
+            "priority": self.priority or "0",
+            "location_orderpoint_id": self.id,
+        }
+
+    def _prepare_procurement(self, product, qty, date_planned, proc_vals):
+        self.ensure_one()
+        proc_vals = copy(proc_vals)
+        proc_vals.update(
+            {
+                "date_planned": date_planned or fields.Datetime.now(),
+            }
+        )
+        return self.env["procurement.group"].Procurement(
+            product,
+            qty,
+            product.uom_id,
+            self.location_id,
+            self.name,
+            self.name,
+            self.company_id,
+            proc_vals,
+        )
+
+    def _execute_procurements(self, procurement_values):
+        """
+        Execute the procurement for products with positive procurement_qty.
+
+        :param procurement_values: list namedtuple object expected by the run
+        method of procurement.group
+        :return: list of created stock.move
+        """
+        with MovesTouchTracker() as tracker:
+            self.env["procurement.group"].with_context(from_orderpoint=True).run(
+                procurement_values, raise_user_error=False
+            )
+            return self.env["stock.move"].browse(tracker.get_ids()).exists()
+
+    # -------------------------------------------------------------------------
+    # Post-processing of replenishment moves
+    # -------------------------------------------------------------------------
+
+    def _after_replenishment(self, replenishment_moves):
+        """
+        Assigns generated replenishment moves.
+        """
+        self._assign_replenishment_moves(
+            replenishment_moves.filtered(lambda m: m.state != "assigned")
+        )
+        picking_priority_to_update = self.env["stock.picking"]
+        for move in replenishment_moves.sudo():
+            new_priority = move.location_orderpoint_id.priority
+            if move.priority != new_priority:
+                move.priority = new_priority
+                picking_priority_to_update |= move.picking_id
+        for picking in picking_priority_to_update:
+            new_priority = max(
+                picking.move_ids.filtered(lambda m: m.state != "cancel").mapped(
+                    "priority"
+                )
+            )
+            if picking.priority != new_priority:
+                # we want to avoid to override the individual move priority by the
+                # picking priority, so we protect the priority field on the
+                # picking's moves
+                with self.env.protecting(
+                    [self.env["stock.move"]._fields["priority"]], picking.move_ids
+                ):
+                    picking.priority = new_priority
+
+        return self._strategy_model._after_run_replenishment(self, replenishment_moves)
+
+    def _assign_replenishment_moves(self, moves_to_assign):
+        """Assigns moves created by the orderpoints"""
+        for moves_chunk in split_every(100, moves_to_assign.ids):
+            self.env["stock.move"].browse(moves_chunk)._action_assign()
+        return moves_to_assign
+
+    # -------------------------------------------------------------------------
+    # Cache lifecycle
+    # -------------------------------------------------------------------------
 
     def _clear_caches(self):
         self._get_ids_by_parent_path.clear_cache(self)
-        self._get_consuming_moves_domain_for_ids.clear_cache(self)
-        self._get_replenishment_moves_domain_for_ids.clear_cache(self)
+        self._get_consuming_moves_domain.clear_cache(self)
+        self._get_supplying_moves_domain.clear_cache(self)
+        self._get_src_domains.clear_cache(self)
+        self._get_dest_domains.clear_cache(self)
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -647,13 +669,7 @@ class StockLocationOrderpoint(models.Model):
         return super().create(vals_list)
 
     def write(self, vals):
-        # if we only update values that change the group_by_domain
-        moves_domain_caches_update_fields = self._get_group_by_domain_config()
-        if any(field in vals for field in moves_domain_caches_update_fields):
-            self._get_consuming_moves_domain_for_ids.clear_cache(self)
-            self._get_replenishment_moves_domain_for_ids.clear_cache(self)
-        else:
-            self._clear_caches()
+        self._clear_caches()
         return super().write(vals)
 
     def unlink(self):

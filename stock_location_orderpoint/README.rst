@@ -99,6 +99,11 @@ Location Orderpoint configuration
    to avoid confirmed receptions taken into account), fill in the 
    'Domain to filter locations' field.
 
+When different orderpoints are defined on the same location, it could result in the creation of several
+replenishment moves for the same product. When this happens, if the moves are merged together, the
+resulting move will be linked to the orderpoint with the highest priority, ensuring that the move 
+inherits the correct priority and is processed accordingly.
+
 Bug Tracker
 ===========
 
@@ -124,6 +129,8 @@ Contributors
 * Michael Tietz (MT Software) <mtietz@mt-software.de>
 * Jacques-Etienne Baudoux (BCIM) <je@bcim.be>
 * Denis Roussel <denis.roussel@acsone.eu>
+* Nicolas Delbovier <nicolas.delbovier@acsone.eu>
+* Laurent Mignon <laurent.mignon@acsone.eu>
 
 Maintainers
 ~~~~~~~~~~~

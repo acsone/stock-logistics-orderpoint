@@ -100,7 +100,7 @@ class TestLocationOrderpointCommon(BaseCommon):
         vals.update(kwargs)
         move = cls.env["stock.move"].create(vals)
         move._write({"create_date": datetime.now()})
-        move._action_confirm()
+        move._action_confirm(merge=False)
         return move
 
     @classmethod
@@ -121,19 +121,22 @@ class TestLocationOrderpointCommon(BaseCommon):
             cls.env.ref("stock.stock_location_suppliers"),
             location,
             product=product,
+            picking_type_id=cls.warehouse.in_type_id.id,
         )
         move.move_line_ids.write({"qty_done": qty})
         move._action_done()
         return move
 
     @classmethod
-    def _create_outgoing_move(cls, qty, location=None, product=None):
+    def _create_outgoing_move(cls, qty, location=None, product=None, **kwargs):
         move = cls._create_move(
             "Delivery",
             qty,
             location or cls.location_dest,
             cls.env.ref("stock.stock_location_customers"),
             product=product,
+            picking_type_id=cls.warehouse.out_type_id.id,
+            **kwargs,
         )
         move._action_assign()
         return move
