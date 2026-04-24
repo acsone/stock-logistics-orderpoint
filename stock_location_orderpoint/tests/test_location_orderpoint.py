@@ -109,6 +109,20 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
         self._assert_replenishment_move(replenish_move, 12, orderpoint)
         self.assertEqual(orderpoint.last_cron_execution, day_after_tomorrow)
 
+    def test_replenishment_delay_procurement_run(self):
+        orderpoint, location_src = self._create_orderpoint_complete(
+            "Stock2", trigger="manual", proc_run_batch_size=10
+        )
+        self._create_outgoing_move(12)
+        self._set_qty_in_location(self.product, location_src, 12)
+        with trap_jobs() as trap:
+            self._run_replenishment(orderpoint)
+            trap.assert_jobs_count(1, only=orderpoint._delayed_execute_procurements)
+            self.product.invalidate_recordset()
+            trap.perform_enqueued_jobs()
+        replenish_move = self._get_replenishment_move(orderpoint)
+        self._assert_replenishment_move(replenish_move, 12, orderpoint)
+
     def test_auto_replenishment(self):
         job_func = self.env["stock.location.orderpoint"].run_replenishment
         move_qty = 12
@@ -220,7 +234,9 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
             )
             job = trap.enqueued_jobs[0]
             self.assertEqual(
-                job.channel, "root.stock_location_orderpoint_auto_replenishment"
+                job.channel,
+                "root.stock_location_orderpoint_replenishment."
+                "stock_location_orderpoint_auto_replenishment",
             )
 
     def test_auto_no_replenishment(self):

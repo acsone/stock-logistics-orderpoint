@@ -88,10 +88,18 @@ class StockLocationOrderpoint(models.Model):
     last_cron_execution = fields.Datetime(
         help="Last time this orderpoint was processed by the cron",
     )
-
     priority = fields.Selection(
         PROCUREMENT_PRIORITIES,
         default="0",
+    )
+    proc_run_batch_size = fields.Integer(
+        default=0,
+        string="Procurement Run Batch Size",
+        help="Number of procurements to run in one batch when processing this "
+        "orderpoint. 0 means no batching, i.e. all procurements will be run in the "
+        "same transaction. If set to a positive value, procurements will be run in batches "
+        "of the given size in delayed jobs, which can help to avoid long-running transactions "
+        "and reduce the risk of deadlocks.",
     )
 
     _sql_constraints = [
@@ -417,6 +425,18 @@ class StockLocationOrderpoint(models.Model):
         if not procurements:
             return result
 
+        # If proc_run_batch_size is set to a positive value, we run the
+        # procurements in batches in delayed jobs to avoid long-running transactions
+        # and reduce the risk of deadlocks. Otherwise, we run all procurements in
+        # the same transaction.
+        if self.proc_run_batch_size > 0:
+            for procurements_chunk in split_every(
+                self.proc_run_batch_size, procurements
+            ):
+                self._enqueue_execute_procurements(procurements_chunk).delay()
+            return result
+
+        # If the batch size is 0, we run all procurements in the same transaction.
         result = self._execute_procurements(procurements)
         return self._after_replenishment(result)
 
@@ -611,6 +631,41 @@ class StockLocationOrderpoint(models.Model):
                 procurement_values, raise_user_error=False
             )
             return self.env["stock.move"].browse(tracker.get_ids()).exists()
+
+    # -------------------------------------------------------------------------
+    # Replenishment delegation to delayed jobs
+    # -------------------------------------------------------------------------
+
+    def _enqueue_execute_procurements(self, procurement_values, **job_options):
+        """Enqueue a job to execute the procurements for this orderpoint
+
+        :param procurement_values: list namedtuple object expected by the run
+        method of procurement.group
+        :param job_options: dict of options to pass to the job (priority, ...)
+
+        :return: a `Job` instance
+        """
+        job_options = job_options.copy()
+        job_options.setdefault(
+            "description",
+            _("Execute replenishment procurements for orderpoint %s")
+            % self.display_name,
+        )
+        delayable = self.delayable(**job_options)
+        job = delayable._delayed_execute_procurements(procurement_values)
+        return job
+
+    def _delayed_execute_procurements(self, procurement_values):
+        """Method to execute procurements in a delayed job for this orderpoint
+
+        :param procurement_values: list namedtuple object expected by the run
+        method of procurement.group
+
+        :return: a recordset of created stock.move
+        """
+        result = self._execute_procurements(procurement_values)
+        self._after_replenishment(result)
+        return f"{len(result)} replenishment moves created for {self.display_name}"
 
     # -------------------------------------------------------------------------
     # Post-processing of replenishment moves

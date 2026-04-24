@@ -55,6 +55,7 @@
                     <field name="sequence" />
                     <field name="trigger" />
                     <field name="replenish_method" />
+                    <field name="proc_run_batch_size" />
                     <field name="company_id" invisible="1" />
                 </group>
                 <group>
