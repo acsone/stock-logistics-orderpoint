@@ -99,7 +99,7 @@ class StockLocationOrderpoint(models.Model):
         "orderpoint. 0 means no batching, i.e. all procurements will be run in the "
         "same transaction. If set to a positive value, procurements will be run in batches "
         "of the given size in delayed jobs, which can help to avoid long-running transactions "
-        "and reduce the risk of deadlocks.",
+        "and reduce the risk of concurrent updates.",
     )
 
     _sql_constraints = [
@@ -398,8 +398,8 @@ class StockLocationOrderpoint(models.Model):
         products = self._get_candidate_products(products)
         if not products and products is not None:
             # an empty recordset means that we have computed
-            # that no product is concerned by the replenishment.
-            # otherise a None value means that we don't want
+            # that no products are concerned by the replenishment.
+            # Otherwise a None value means that we don't want
             # to limit the scope of the computation
             return result
 
