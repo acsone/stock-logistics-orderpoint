@@ -37,14 +37,14 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
         """
         self.env.cr.execute(sql, params)
         product_ids = [row[0] for row in self.env.cr.fetchall()]
-        return orderpoint._product_model.browse(product_ids)
+        return self.env["product.product"].browse(product_ids)
 
     @api.model
     def _compute_demand(self, orderpoint, products) -> dict[int, float]:
         """
         Compute demand for the given products according to the fill-up strategy.
         The demand is computed as the quantity required to ensure that the
-        available quantity (virtual + incoming) is not negative, i.e. to fill
+        virtual available quantity is not negative, i.e. to fill
         up the stock up to 0. according to the quantity available at source
         location and the quantity already incoming.
 
@@ -52,11 +52,11 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
         :param products: product.product recordset
         """
         demand_data = {}
-        qties_on_dest = products.with_context(
+        qties_on_location = products.with_context(
             location=orderpoint.location_id.id
         )._compute_quantities_dict(None, None, None)
-        for product_id, qties_on_dest in qties_on_dest.items():
-            virtual_available_on_dest = qties_on_dest["virtual_available"]
+        for product_id, qties_on_location in qties_on_location.items():
+            virtual_available_on_dest = qties_on_location["virtual_available"]
             if (
                 float_compare(
                     virtual_available_on_dest,
@@ -97,12 +97,15 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
         """
         self.env.cr.execute(sql, params)
         dates_by_product = {row[0]: row[1] for row in self.env.cr.fetchall()}
+        picking_change_date_ids = set()
         for move in replenishment_moves:
             if move.product_id.id not in dates_by_product:
                 continue
             move.date = dates_by_product[move.product_id.id]
-        for picking in replenishment_moves.mapped("picking_id"):
-            picking_date = min(picking.mapped("move_ids.date"))
+            picking_change_date_ids.add(move.picking_id.id)
+        pickings = self.env["stock.picking"].browse(picking_change_date_ids)
+        for picking in pickings:
+            picking_date = min(picking.move_ids.mapped("date"))
             if picking_date < picking.scheduled_date:
                 picking.scheduled_date = picking_date
         return replenishment_moves

@@ -117,7 +117,7 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
         self._set_qty_in_location(self.product, location_src, 12)
         with trap_jobs() as trap:
             self._run_replenishment(orderpoint)
-            trap.assert_jobs_count(1, only=orderpoint._delayed_execute_procurements)
+            trap.assert_jobs_count(1, only=orderpoint._execute_procurements)
             self.product.invalidate_recordset()
             trap.perform_enqueued_jobs()
         replenish_move = self._get_replenishment_move(orderpoint)

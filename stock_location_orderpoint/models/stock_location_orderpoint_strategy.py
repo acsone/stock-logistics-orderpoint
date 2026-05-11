@@ -21,7 +21,9 @@ class StockLocationOrderpointStrategy(models.AbstractModel):
         This method is only called if the orderpoint is not triggered for a specific product's
         recordset
         """
-        return self.env["product.product"].search([("type", "=", "product")])
+        raise NotImplementedError(
+            "The _get_candidate_products method should be implemented in the strategy"
+        )
 
     @api.model
     def _compute_demand(self, orderpoint, products) -> dict[int, float]:
