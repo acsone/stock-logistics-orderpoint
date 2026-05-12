@@ -19,10 +19,10 @@ from .common import TestLocationOrderpointCommon
 class TestLocationOrderpoint(TestLocationOrderpointCommon):
     def test_manual_replenishment(self):
         orderpoint, location_src = self._create_orderpoint_complete(
-            "Stock2", trigger="manual", proc_run_async=False
+            "Stock2", trigger="manual", sequence=3, proc_run_async=False
         )
         orderpoint2, location_src2 = self._create_orderpoint_complete(
-            "Stock2.2", trigger="manual", proc_run_async=False
+            "Stock2.2", trigger="manual", sequence=2, proc_run_async=False
         )
 
         self.assertEqual(orderpoint.location_src_id, location_src)
@@ -48,16 +48,13 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
         self._run_replenishment(orderpoints)
 
         replenish_moves = self._get_replenishment_move(orderpoints)
-        self.assertEqual(len(replenish_moves), 2)
-        self.assertEqual(sum(replenish_moves.mapped("product_qty")), 13)
+        self.assertEqual(len(replenish_moves), 1)
+        self.assertEqual(sum(replenish_moves.mapped("product_qty")), 12)
 
         move = replenish_moves.filtered(
-            lambda _move: _move.rule_id == orderpoint.route_id.rule_ids
+            lambda _move: _move.rule_id == orderpoint2.route_id.rule_ids
         )
-        self._assert_replenishment_move(move, 12, orderpoint)
-
-        move = replenish_moves - move
-        self._assert_replenishment_move(move, 1, orderpoint2)
+        self._assert_replenishment_move(move, 12, orderpoint2)
 
     @contextmanager
     def _freeze_time(self, now):

@@ -386,11 +386,17 @@ class StockLocationOrderpoint(models.Model):
             If provided, limits the computation scope.
         """
         result = self.env["stock.move"]
-        for orderpoint in self:
-            result |= orderpoint._run_replenishment(products=products)
+        processed = set()
+        for orderpoint in self.sorted():
+            result |= orderpoint._run_replenishment(
+                products=products, processed=processed
+            )
+            processed.update(
+                [(orderpoint.location_id.id, m.product_id.id) for m in result]
+            )
         return result
 
-    def _run_replenishment(self, products=None):
+    def _run_replenishment(self, products=None, processed=None):
         """
         Internal pipeline:
         1. determine candidate products
@@ -414,13 +420,26 @@ class StockLocationOrderpoint(models.Model):
           that qty availability and procurement creation are never split across
           separate transactions, and keeps the number of jobs bounded by the
           number of products with actual demand (not the total product catalogue).
+
+        :param products: optional recordset of product.product
+        :param processed: set of (location_id, product_id) tuples that have already
+                          been processed
         """
         result = self.env["stock.move"]
+        processed = processed or set()
         self.ensure_one()
         products = self._get_candidate_products(products)
+
+        # filter out products that have already been processed by
+        # another orderpoint to avoid redundant processing
+        if products is not None and processed:
+            products = products.filtered(
+                lambda p: (self.location_id.id, p.id) not in processed
+            )
+
         if not products and products is not None:
-            # an empty recordset means that we have computed
-            # that no products are concerned by the replenishment.
+            # an empty recordset means that no products
+            # are concerned by the replenishment.
             # Otherwise a None value means that we don't want
             # to limit the scope of the computation
             return result
@@ -428,6 +447,18 @@ class StockLocationOrderpoint(models.Model):
         products = self._with_excluded_location_context(products)
 
         demand_data = self._compute_demand(products)
+
+        # exclude already processed products from demand_data to avoid redundant processing
+        # the filtering is done here since the demand computation could reintroduce products
+        # That's the case when None is passed as products which means that the demand should
+        # not be soped to a specific set of products.
+        if demand_data and processed:
+            demand_data = {
+                pid: qty
+                for pid, qty in demand_data.items()
+                if (self.location_id.id, pid) not in processed
+            }
+
         if not demand_data:
             return result
 
