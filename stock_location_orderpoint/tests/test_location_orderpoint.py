@@ -19,10 +19,10 @@ from .common import TestLocationOrderpointCommon
 class TestLocationOrderpoint(TestLocationOrderpointCommon):
     def test_manual_replenishment(self):
         orderpoint, location_src = self._create_orderpoint_complete(
-            "Stock2", trigger="manual"
+            "Stock2", trigger="manual", proc_run_async=False
         )
         orderpoint2, location_src2 = self._create_orderpoint_complete(
-            "Stock2.2", trigger="manual"
+            "Stock2.2", trigger="manual", proc_run_async=False
         )
 
         self.assertEqual(orderpoint.location_src_id, location_src)
@@ -79,7 +79,7 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
     def test_cron_replenishment(self):
         cron = self.env.ref("stock_location_orderpoint.ir_cron_location_replenishment")
         orderpoint, location_src = self._create_orderpoint_complete(
-            "Stock2", trigger="cron"
+            "Stock2", trigger="cron", proc_run_async=False
         )
         # at this point the orderpoint has no last_cron_execution
         self.assertFalse(orderpoint.last_cron_execution)
@@ -111,13 +111,15 @@ class TestLocationOrderpoint(TestLocationOrderpointCommon):
 
     def test_replenishment_delay_procurement_run(self):
         orderpoint, location_src = self._create_orderpoint_complete(
-            "Stock2", trigger="manual", proc_run_batch_size=10
+            "Stock2", trigger="manual", proc_run_async=True
         )
         self._create_outgoing_move(12)
         self._set_qty_in_location(self.product, location_src, 12)
         with trap_jobs() as trap:
             self._run_replenishment(orderpoint)
-            trap.assert_jobs_count(1, only=orderpoint._execute_procurements)
+            trap.assert_jobs_count(
+                3, only=self.env["stock.location.orderpoint"]._fulfill_procurement
+            )
             self.product.invalidate_recordset()
             trap.perform_enqueued_jobs()
         replenish_move = self._get_replenishment_move(orderpoint)

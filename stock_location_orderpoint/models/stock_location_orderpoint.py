@@ -8,6 +8,7 @@ from odoo.exceptions import ValidationError
 from odoo.osv import expression
 from odoo.tools import split_every
 
+from odoo.addons.queue_job.job import identity_exact
 from odoo.addons.stock.models.stock_move import PROCUREMENT_PRIORITIES
 
 from .stock_location_orderpoint_strategy import StockLocationOrderpointStrategy
@@ -83,6 +84,12 @@ class StockLocationOrderpoint(models.Model):
     location_src_id = fields.Many2one(
         "stock.location", compute="_compute_location_src_id", store=True
     )
+    replenish_limit_to_free_qty = fields.Boolean(
+        string="Limit replenishment to free quantity at source location",
+        help="If enabled, the replenishment quantity will be "
+        "limited to the free quantity at the source location. ",
+        default=True,
+    )
     active = fields.Boolean(default=True)
 
     last_cron_execution = fields.Datetime(
@@ -92,14 +99,15 @@ class StockLocationOrderpoint(models.Model):
         PROCUREMENT_PRIORITIES,
         default="0",
     )
-    proc_run_batch_size = fields.Integer(
-        default=0,
-        string="Procurement Run Batch Size",
-        help="Number of procurements to run in one batch when processing this "
-        "orderpoint. 0 means no batching, i.e. all procurements will be run in the "
-        "same transaction. If set to a positive value, procurements will be run in batches "
-        "of the given size in delayed jobs, which can help to avoid long-running transactions "
-        "and reduce the risk of concurrent updates.",
+    proc_run_async = fields.Boolean(
+        string="Delay procurement execution",
+        help="If enabled, procurements will be run asynchronously in delayed jobs "
+        "when processing this orderpoint. Only applies to 'cron' and 'manual' triggers. "
+        "If disabled, all procurements will be run in the same transaction. ",
+        compute="_compute_proc_run_async",
+        store=True,
+        readonly=False,
+        precompute=True,
     )
 
     _sql_constraints = [
@@ -144,6 +152,11 @@ class StockLocationOrderpoint(models.Model):
                     "make_to_stock",
                 )
             orderpoint.location_src_id = location
+
+    @api.depends("trigger")
+    def _compute_proc_run_async(self):
+        for orderpoint in self:
+            orderpoint.proc_run_async = orderpoint.trigger in ("cron", "manual")
 
     # -------------------------------------------------------------------------
     # Orderpoint selection and domains
@@ -365,71 +378,148 @@ class StockLocationOrderpoint(models.Model):
         orderpoints = self._get_orderpoints("auto", locations, location_field)
         orderpoints.run_replenishment(products)
 
-    def run_replenishment(self, products=None):
+    def run_replenishment(self, products=None, job_logs=None):
         """
         Public entry point to execute the replenishment rule.
 
         :param products: optional recordset of product.product
             If provided, limits the computation scope.
+        :param job_logs: list to append log messages to in case of synchronous execution,
+            from delayed jobs. These messages will be posted as result of the job execution.
         """
         result = self.env["stock.move"]
-        for orderpoint in self:
-            result |= orderpoint._run_replenishment(products=products)
+        processed = set()
+        for orderpoint in self.sorted():
+            result |= orderpoint._run_replenishment(
+                products=products, processed=processed, job_logs=job_logs
+            )
+            processed.update(
+                [orderpoint._processed_key(m.product_id.id) for m in result]
+            )
         return result
 
-    def _run_replenishment(self, products=None):
+    def _processed_key(self, product_id):
+        """Return the deduplication key for one product in this orderpoint context."""
+        self.ensure_one()
+        return (self.priority, self.location_id.id, product_id)
+
+    def _run_replenishment(self, products=None, processed=None, job_logs=None):
         """
         Internal pipeline:
         1. determine candidate products
         2. compute demand (strategy)
-        3. compute available quantities
-        4. compute delta
-        5. execute replenishment
+        3. compute qty to procure and execute replenishment
+           (either synchronously or via delayed jobs per product)
+
+        Two delay mechanisms exist in this module and serve different purposes:
+
+        - AUTO trigger: the delay happens *before* this pipeline, in stock.move,
+          one job per (orderpoint, product) pair. Its goal is to avoid computing
+          demand for products whose move does not actually impact any orderpoint.
+          Because the delay already happened upstream, _must_delay_fulfill_procurement()
+          always returns False for AUTO orderpoints, and procurement execution is
+          always synchronous here.
+
+        - CRON / MANUAL triggers: when proc_run_async is True, one job per
+          (orderpoint, product) is enqueued after demand is computed. Each job
+          then handles the full remaining pipeline atomically: available qty
+          computation, procurement qty decision, and execution. This ensures
+          that qty availability and procurement creation are never split across
+          separate transactions, and keeps the number of jobs bounded by the
+          number of products with actual demand (not the total product catalogue).
+
+        :param products: optional recordset of product.product
+        :param processed: set of (location_id, product_id) tuples that have already
+                          been processed
+        :param job_logs: list to append log messages to in case of synchronous execution,
+                         from delayed jobs. These messages will be posted as result of the
+                         job execution.
         """
         result = self.env["stock.move"]
+        processed = processed or set()
         self.ensure_one()
+        is_delayed = self._must_delay_fulfill_procurement()
         products = self._get_candidate_products(products)
+
+        # filter out products that have already been processed by
+        # another orderpoint to avoid redundant processing
+        if products is not None and processed and is_delayed:
+            products = products.filtered(
+                lambda p: self._processed_key(p.id) not in processed
+            )
+
         if not products and products is not None:
-            # an empty recordset means that we have computed
-            # that no products are concerned by the replenishment.
+            # an empty recordset means that no products
+            # are concerned by the replenishment.
             # Otherwise a None value means that we don't want
             # to limit the scope of the computation
+            if job_logs is not None:
+                job_logs.append(
+                    _(
+                        "No products to replenish for orderpoint %(orderpoint)s",
+                        orderpoint=self.display_name,
+                    )
+                )
             return result
 
         products = self._with_excluded_location_context(products)
 
         demand_data = self._compute_demand(products)
+
+        # exclude already processed products from demand_data to avoid redundant processing
+        # the filtering is done here since the demand computation could reintroduce products
+        # That's the case when None is passed as products which means that the demand should
+        # not be soped to a specific set of products.
+        if demand_data and processed and is_delayed:
+            demand_data = {
+                pid: qty
+                for pid, qty in demand_data.items()
+                if self._processed_key(pid) not in processed
+            }
+
         if not demand_data:
+            if job_logs is not None:
+                job_logs.append(
+                    _(
+                        "No demand to replenish for orderpoint %(orderpoint)s",
+                        orderpoint=self.display_name,
+                    )
+                )
             return result
 
-        # we filter the products to compute only the quantities
-        # for the products for which we have a demand.
-        products = self._product_model.browse(demand_data.keys())
+        # Delay per-product fulfillment if needed.
+        # For AUTO orderpoints, _must_delay_fulfill_procurement() always returns
+        # False: they already run inside a queue.job enqueued by stock.move.
+        if is_delayed:
+            for product_id, demand_qty in demand_data.items():
+                self._enqueue_fulfill_procurement(product_id, demand_qty).delay()
+            return result
 
-        qty_available_data = self._compute_available_quantities(products)
-
-        procurement_data = self._compute_procurement_qty(
-            demand_data, qty_available_data
-        )
+        procurement_data = self._compute_procurement_qty(demand_data)
         if not procurement_data:
+            if job_logs is not None:
+                job_logs.append(
+                    _(
+                        "No procurement to run for orderpoint %(orderpoint)s after computing "
+                        "procurement quantities",
+                        orderpoint=self.display_name,
+                    )
+                )
             return result
+        if job_logs is not None:
+            job_logs.append(
+                _(
+                    "Running replenishment for orderpoint %(orderpoint)s for %(product_count)s "
+                    "products.",
+                    orderpoint=self.display_name,
+                    product_count=len(procurement_data),
+                )
+            )
 
         procurements = self._build_procurements(procurement_data)
         if not procurements:
             return result
 
-        # If proc_run_batch_size is set to a positive value, we run the
-        # procurements in batches in delayed jobs to avoid long-running transactions
-        # and reduce the risk of deadlocks. Otherwise, we run all procurements in
-        # the same transaction.
-        if self.proc_run_batch_size > 0:
-            for procurements_chunk in split_every(
-                self.proc_run_batch_size, procurements
-            ):
-                self._enqueue_execute_procurements(procurements_chunk).delay()
-            return result
-
-        # If the batch size is 0, we run all procurements in the same transaction.
         result = self._execute_run_procurements(procurements)
         return self._after_replenishment(result)
 
@@ -565,12 +655,27 @@ class StockLocationOrderpoint(models.Model):
         self.env.cr.execute(final_sql, params)
         return dict(self.env.cr.fetchall())
 
-    def _compute_procurement_qty(self, demand_data, qty_available_data):
+    def _compute_procurement_qty(self, demand_data):
         """
-        Merge demand and available quantities.
+        Compute procurement quantities based on demand.
+
+        If replenish_limit_to_free_qty is False, procurement qty equals demand.
+        If replenish_limit_to_free_qty is True, procurement qty is limited to the
+        free quantity at the source location.
+
+        These two steps — availability check and qty decision — are intentionally
+        kept together: splitting them across separate transactions could lead to
+        over-replenishment when multiple orderpoints share the same source location.
 
         :return: dict {product_id: procurement_qty}
         """
+        if not self.replenish_limit_to_free_qty:
+            return demand_data
+
+        # Resolve products from demand keys to pass to the availability query.
+        products = self._product_model.browse(demand_data.keys())
+        qty_available_data = self._compute_available_quantities(products)
+
         return {
             product_id: min(
                 demand_data[product_id], qty_available_data.get(product_id, 0)
@@ -613,11 +718,15 @@ class StockLocationOrderpoint(models.Model):
 
     def _execute_run_procurements(self, procurement_values):
         """
-        Execute the procurement for products with positive procurement_qty.
+        Execute the procurements synchronously and return the created moves.
 
-        :param procurement_values: list namedtuple object expected by the run
-        method of procurement.group
-        :return: list of created stock.move
+        This is the sole synchronous execution path, shared by:
+        - AUTO orderpoints (always, since they already run inside a queue.job)
+        - CRON / MANUAL orderpoints when proc_run_async is False
+        - The delayed job _fulfill_procurement() for async cron/manual runs
+
+        :param procurement_values: list of namedtuple Procurement objects
+        :return: recordset of created stock.move
         """
         with MovesTouchTracker() as tracker:
             self.env["procurement.group"].with_context(from_orderpoint=True).run(
@@ -626,41 +735,129 @@ class StockLocationOrderpoint(models.Model):
             return self.env["stock.move"].browse(tracker.get_ids()).exists()
 
     # -------------------------------------------------------------------------
-    # Replenishment delegation to delayed jobs
+    # Replenishment delegation to delayed jobs (cron / manual only)
     # -------------------------------------------------------------------------
 
-    def _enqueue_execute_procurements(self, procurement_values, **job_options):
-        """Enqueue a job to execute the procurements for this orderpoint
+    def _must_delay_fulfill_procurement(self):
+        """
+        Returns True when per-product procurement fulfillment should be
+        deferred to queue.jobs rather than run synchronously.
 
-        :param procurement_values: list namedtuple object expected by the run
-        method of procurement.group
-        :param job_options: dict of options to pass to the job (priority, ...)
+        Restricted to 'cron' and 'manual' triggers (via proc_run_async).
+        AUTO orderpoints must never reach this branch: they are already
+        executing inside a queue.job enqueued by stock.move via
+        _enqueue_run_replenishment(). Delaying again would create a
+        superfluous second job chain without any benefit.
+        """
+        self.ensure_one()
+        if self.trigger == "auto":
+            return False
+        if "force_sync" in self.env.context:
+            return not self.env.context["force_sync"]
+        return self.proc_run_async
 
-        :return: a `Job` instance
+    def _enqueue_fulfill_procurement(self, product_id, demand_qty, **job_options):
+        """
+        Enqueue a delayed job to fulfill the procurement for one product.
+
+        Used exclusively by cron and manual triggers when proc_run_async is True.
+        The actual work is performed by _fulfill_procurement().
+
+        :param product_id: ID of the product to fulfill
+        :param demand_qty: demanded quantity as computed by _compute_demand()
+        :param job_options: extra options forwarded to the job (priority, …)
+        :return: a Job instance (not yet delayed — caller must call .delay())
         """
         job_options = job_options.copy()
         job_options.setdefault(
             "description",
-            _("Execute replenishment procurements for orderpoint %s")
-            % self.display_name,
+            _(
+                "Try to fulfill procurement for product %(product_name)s in location "
+                "%(location_name)s for a demand of %(demand_qty)s with priority %(priority)s",
+                product_name=self.env["product.product"]
+                .browse(product_id)
+                .display_name,
+                location_name=self.location_id.display_name,
+                demand_qty=demand_qty,
+                priority=self.priority or "0",
+            ),
         )
-        delayable = self.delayable(**job_options)
-        job = delayable._execute_procurements(procurement_values)
-        return job
+        job_options.setdefault("identity_key", identity_exact)
+        delayable = self.env[self._name].delayable(**job_options)
+        return delayable._fulfill_procurement(
+            self.priority, self.location_id.id, product_id
+        )
 
-    def _execute_procurements(self, procurement_values):
-        """Method to execute run the procurements for this orderpoint,
-        and post-process the created moves in a single call.
-        This is the method called by the delayed job.
-
-        :param procurement_values: list namedtuple object expected by the run
-        method of procurement.group
-
-        :return: a recordset of created stock.move
+    @api.model
+    def _fulfill_procurement(self, priority, location_id, product_id):
         """
-        result = self._execute_run_procurements(procurement_values)
-        self._after_replenishment(result)
-        return f"{len(result)} replenishment moves created for {self.display_name}"
+        Fulfill the procurement for a single product at a specific location with a
+        given priority.
+
+        Lookup the orderpoints with the given location and priority and force them
+        to run the replenishment logic synchronously for the given product.
+
+        It will run the full replenishment pipeline for the given product in
+        a single transaction in a synchronous way.
+
+        By running the full pipeline, we ensure that the job is indepondent of any previous
+        computation and that the availability and procurement creation are consistent.
+
+        This is the queue.job entry point for async cron/manual runs, but its
+        contract is independent of that context. It can equally be called
+        synchronously when needed.
+
+        When proc_run_async is True, one job per (priority, location, product) is
+        created after _compute_demand(), so the number of jobs is bounded by
+        the number of products with actual demand — not the total product
+        catalogue.
+
+        :param priority: the procurement priority to match orderpoints with
+        :param location_id: the stock.location id to match orderpoints with
+        :param product_id: ID of the product to fulfill
+        :return: a human-readable summary string (stored as the job result)
+        """
+        orderpoints = self.search(
+            [
+                ("priority", "=", priority),
+                ("location_id", "=", location_id),
+            ]
+        )
+        job_logs = []
+        if not orderpoints:
+            job_logs.append(
+                _(
+                    "No orderpoints found for location %(location_name)s with priority "
+                    "%(priority)s",
+                    location_name=self.env["stock.location"]
+                    .browse(location_id)
+                    .display_name,
+                    priority=priority or "0",
+                )
+            )
+        else:
+            product = self.env["product.product"].browse(product_id)
+            result = orderpoints.with_context(force_sync=True).run_replenishment(
+                products=product,
+                job_logs=job_logs,
+            )
+            job_logs.append(
+                _(
+                    "Fulfilled procurement for product %(product_name)s in location "
+                    "%(location_name)s.",
+                    product_name=product.display_name,
+                    location_name=orderpoints[0].location_id.display_name
+                    if orderpoints
+                    else "N/A",
+                )
+            )
+            job_logs.append(
+                _(
+                    "%(move_count)s replenishment moves created.",
+                    move_count=len(result),
+                )
+            )
+        return "\n".join(job_logs)
 
     # -------------------------------------------------------------------------
     # Post-processing of replenishment moves
