@@ -199,7 +199,7 @@ class TestLocationOrderpointCommon(BaseCommon):
         cls, location_name, location_dest=None, warehouse=None, **kwargs
     ):
         location = cls._create_location(location_name, location_dest=location_dest)
-        picking_type, route = cls._create_picking_type_route_rule(
+        _picking_type, route = cls._create_picking_type_route_rule(
             location, location_dest=location_dest, warehouse=warehouse
         )
         values = kwargs or {}

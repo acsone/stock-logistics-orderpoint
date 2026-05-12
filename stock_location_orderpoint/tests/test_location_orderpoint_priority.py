@@ -37,6 +37,7 @@ class TestLocationOrderpointPriority(TestLocationOrderpointCommon):
         manual_orderpoint, location_src = self._create_orderpoint_complete(
             "Stock2",
             trigger="manual",
+            proc_run_async=False,
         )
         self._create_outgoing_move(move_qty)
         self._create_incoming_move(move_qty, location_src)
@@ -111,6 +112,7 @@ class TestLocationOrderpointPriority(TestLocationOrderpointCommon):
         orderpoint, location_src = self._create_orderpoint_complete(
             "Stock2",
             trigger="manual",
+            proc_run_async=False,
         )
         self._create_outgoing_move(move_qty)
         self._create_incoming_move(move_qty, location_src)
@@ -204,6 +206,7 @@ class TestLocationOrderpointPriority(TestLocationOrderpointCommon):
         orderpoint, location_src = self._create_orderpoint_complete(
             "Stock2",
             trigger="manual",
+            proc_run_async=False,
         )
         self._create_outgoing_move(move_qty)
         self._create_incoming_move(move_qty, location_src)
@@ -264,6 +267,7 @@ class TestLocationOrderpointPriority(TestLocationOrderpointCommon):
         ) = self._create_orderpoint_complete(
             "Reserve",
             trigger="manual",
+            proc_run_async=False,
         )
         manual_orderpoint_2 = manual_orderpoint_1.copy({"priority": "1"})
 

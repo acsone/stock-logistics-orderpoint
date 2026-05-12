@@ -45,12 +45,43 @@ class StockMove(models.Model):
                 ).delay()
 
     def _enqueue_run_replenishment(self, orderpoint, product, **job_options):
-        """Enqueue a job stock.location.orderpoint.run_replenishment()
+        """
+        Enqueue a replenishment job for a single (orderpoint, product) pair.
 
-        Can be extended to pass different options to the job (priority, ...).
-        The usage of `.setdefault` allows to override the options set by default.
+        This is the delay point for AUTO orderpoints. It fires *before* the
+        replenishment pipeline so that the full computation (candidate selection,
+        demand, available qty, procurement) only happens inside a worker, and
+        only for products whose move actually impacts an orderpoint. The identity
+        key deduplicates concurrent triggers for the same (orderpoint, product).
 
-        return: a `Job` instance
+        Design note — two delay mechanisms coexist intentionally:
+
+        1. This method (AUTO, delay before pipeline):
+           - Granularity: one job per (orderpoint × product).
+           - Purpose: avoid redundant demand calculations for products that do
+             not impact any orderpoint, and deduplicate concurrent stock.move
+             events that concern the same (orderpoint, product) pair.
+           - The entire _run_replenishment() pipeline runs synchronously inside
+             the worker; procurement execution is therefore also synchronous.
+
+        2. _enqueue_fulfill_procurement() (CRON / MANUAL, delay after demand):
+           - Granularity: one job per (orderpoint x product) that has
+             non-zero demand.
+           - Purpose: defer the costly fulfillment step while keeping the
+             availability check, procurement qty decision and procurement run
+             in the same worker transaction.
+           - Demand is computed in the caller transaction; each delayed job
+             then executes _fulfill_procurement(product_id, demand_qty).
+
+        Merging the two would require creating one job per candidate product
+        before demand is computed, producing tens of thousands of unnecessary
+        jobs on large databases (observed: 10,000+ jobs for ~300 actual
+        replenishments on a production database using the daily-sale strategy).
+
+        Can be extended to pass different options to the job (priority, …).
+        The usage of `.setdefault` allows callers to override the defaults.
+
+        :return: a Job instance (not yet delayed — caller must call .delay())
         """
         job_options = job_options.copy()
         job_options.setdefault(
@@ -67,10 +98,7 @@ class StockMove(models.Model):
         # do not enqueue 2 jobs for the same location and product set
         job_options.setdefault("identity_key", identity_exact)
         delayable = orderpoint.delayable(**job_options)
-        job = delayable.run_replenishment(
-            product,
-        )
-        return job
+        return delayable.run_replenishment(product)
 
     def _action_assign(self, *args, **kwargs):
         """This triggers the replenishment for new moves which are waiting for stock"""
