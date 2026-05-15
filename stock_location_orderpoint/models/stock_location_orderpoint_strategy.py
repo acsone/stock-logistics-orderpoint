@@ -9,12 +9,12 @@ class StockLocationOrderpointStrategy(models.AbstractModel):
     _description = "Stock location orderpoint strategy"
 
     @api.model
-    def _get_candidate_products(self, orderpoint):
+    def _get_candidate_products(self, location):
         """
         Get the candidate products to compute the demand for according to a specific strategy.
         By default, we consider that all stockable products are candidates.
 
-        :param orderpoint: stock.location.orderpoint record
+        :param location: stock.location record
 
          :return: product.product recordset
 
@@ -26,11 +26,11 @@ class StockLocationOrderpointStrategy(models.AbstractModel):
         )
 
     @api.model
-    def _compute_demand(self, orderpoint, products) -> dict[int, float]:
+    def _compute_demand(self, location, products) -> dict[int, float]:
         """
         Compute demand for the given products according to a specific strategy.
 
-        :param orderpoint: stock.location.orderpoint record
+        :param location: stock.location record
         :param products: product.product recordset
 
         :return: dict {product_id: demand_qty}
@@ -44,13 +44,13 @@ class StockLocationOrderpointStrategy(models.AbstractModel):
         )
 
     @api.model
-    def _after_run_replenishment(self, orderpoint, replenishment_moves):
+    def _after_run_replenishment(self, location, replenishment_moves):
         """
         Method called after the replenishment moves have been created for an orderpoint.
         This allows to implement specific logic after the replenishment, like changing the
         priority of the replenishment moves according to the strategy.
 
-        :param orderpoint: stock.location.orderpoint record
+        :param location: stock.location record
         :param replenishment_moves: stock.move recordset of the replenishment moves that
         have been created
         """

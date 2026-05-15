@@ -11,7 +11,7 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
     _description = "Stock location orderpoint strategy: fill up to the max quantity"
 
     @api.model
-    def _get_candidate_products(self, orderpoint):
+    def _get_candidate_products(self, location):
         """
         In the fill-up strategy, if the orderpoint is triggered without specifying products,
         we want to consider only the products with pending not fully reserved moves
@@ -20,11 +20,13 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
         location, and if there are no pending moves for a product, it means that there is no
         demand for this product at the destination location.
 
-        :param orderpoint: stock.location.orderpoint record
+        :param location: stock.location record
 
         :return: product.product recordset
         """
-        domain_move = orderpoint._get_consuming_moves_domain(orderpoint.id)
+        domain_move = self.env["stock.location"]._get_consuming_moves_domain(
+            location.id
+        )
         stock_move_obj = self.env["stock.move"]
         stock_move_obj._flush_search(domain_move)
         query = stock_move_obj._where_calc(domain_move)
@@ -40,7 +42,7 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
         return self.env["product.product"].browse(product_ids)
 
     @api.model
-    def _compute_demand(self, orderpoint, products) -> dict[int, float]:
+    def _compute_demand(self, location, products) -> dict[int, float]:
         """
         Compute demand for the given products according to the fill-up strategy.
         The demand is computed as the quantity required to ensure that the
@@ -48,12 +50,12 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
         up the stock up to 0. according to the quantity available at source
         location and the quantity already incoming.
 
-        :param orderpoint: stock.location.orderpoint record
+        :param location: stock.location record
         :param products: product.product recordset
         """
         demand_data = {}
         qties_on_location = products.with_context(
-            location=orderpoint.location_id.id
+            location=location.id
         )._compute_quantities_dict(None, None, None)
         for product_id, qties_on_location in qties_on_location.items():
             virtual_available_on_dest = qties_on_location["virtual_available"]
@@ -72,16 +74,18 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
         return demand_data
 
     @api.model
-    def _after_run_replenishment(self, orderpoint, replenishment_moves):
+    def _after_run_replenishment(self, location, replenishment_moves):
         """In the fill-up strategy, we want to set the date of the replenishment moves
         to the earliest date of the pending moves for the same product and the same
         destination location, to ensure that the replenishment is done in time to meet
         the demand of these pending moves.
         """
         replenishment_moves = super()._after_run_replenishment(
-            orderpoint, replenishment_moves
+            location, replenishment_moves
         )
-        domain_move = orderpoint._get_consuming_moves_domain(orderpoint.id)
+        domain_move = self.env["stock.location"]._get_consuming_moves_domain(
+            location.id
+        )
         stock_move_obj = self.env["stock.move"]
         stock_move_obj._flush_search(domain_move)
         stock_move_obj.flush_model(["date"])

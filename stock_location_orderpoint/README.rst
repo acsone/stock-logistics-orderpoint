@@ -122,6 +122,7 @@ Authors
 
 * MT Software
 * BCIM
+* ACSONE SA/NV
 
 Contributors
 ~~~~~~~~~~~~
@@ -148,10 +149,13 @@ promote its widespread use.
 .. |maintainer-mt-software-de| image:: https://github.com/mt-software-de.png?size=40px
     :target: https://github.com/mt-software-de
     :alt: mt-software-de
+.. |maintainer-lmignon| image:: https://github.com/lmignon.png?size=40px
+    :target: https://github.com/lmignon
+    :alt: lmignon
 
-Current `maintainer <https://odoo-community.org/page/maintainer-role>`__:
+Current `maintainers <https://odoo-community.org/page/maintainer-role>`__:
 
-|maintainer-mt-software-de| 
+|maintainer-mt-software-de| |maintainer-lmignon| 
 
 This module is part of the `OCA/stock-logistics-orderpoint <https://github.com/OCA/stock-logistics-orderpoint/tree/16.0/stock_location_orderpoint>`_ project on GitHub.
 
