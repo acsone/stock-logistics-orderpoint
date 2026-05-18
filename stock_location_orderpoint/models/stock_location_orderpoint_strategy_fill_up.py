@@ -11,7 +11,7 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
     _description = "Stock location orderpoint strategy: fill up to the max quantity"
 
     @api.model
-    def _get_candidate_products(self, location):
+    def _get_candidate_products(self, location, products=None):
         """
         In the fill-up strategy, if the orderpoint is triggered without specifying products,
         we want to consider only the products with pending not fully reserved moves
@@ -21,9 +21,12 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
         demand for this product at the destination location.
 
         :param location: stock.location record
+        :param products: product.product recordset or None
 
         :return: product.product recordset
         """
+        if products:
+            return products
         domain_move = self.env["stock.location"]._get_consuming_moves_domain(
             location.id
         )

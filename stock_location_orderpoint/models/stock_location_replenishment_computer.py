@@ -121,9 +121,10 @@ class StockLocationReplenishmentComputer(models.TransientModel):
         self.ensure_one()
         location = self.location_id
         if self.excluded_location_domain:
-            products = products.with_context(
-                excluded_location_domain=self.excluded_location_domain
-            )
+            if products is not None:
+                products = products.with_context(
+                    excluded_location_domain=self.excluded_location_domain
+                )
             location = location.with_context(
                 excluded_location_domain=self.excluded_location_domain
             )

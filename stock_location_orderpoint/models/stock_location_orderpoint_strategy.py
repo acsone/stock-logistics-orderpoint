@@ -9,17 +9,18 @@ class StockLocationOrderpointStrategy(models.AbstractModel):
     _description = "Stock location orderpoint strategy"
 
     @api.model
-    def _get_candidate_products(self, location):
+    def _get_candidate_products(self, location, products=None):
         """
         Get the candidate products to compute the demand for according to a specific strategy.
         By default, we consider that all stockable products are candidates.
 
         :param location: stock.location record
+        :param products: product.product recordset or None
 
          :return: product.product recordset
 
-        This method is only called if the orderpoint is not triggered for a specific product's
-        recordset
+        When the method is called with products, it's responsible to filter
+        them according to the strategy logic.
         """
         raise NotImplementedError(
             "The _get_candidate_products method should be implemented in the strategy"
