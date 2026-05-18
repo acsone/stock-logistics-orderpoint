@@ -5,6 +5,14 @@ from odoo.osv import expression
 from odoo.tools.safe_eval import safe_eval
 
 
+def make_hashable(val):
+    if isinstance(val, list):
+        return tuple(make_hashable(v) for v in val)
+    if isinstance(val, dict):
+        return tuple(sorted((k, make_hashable(v)) for k, v in val.items()))
+    return val
+
+
 class StockLocation(models.Model):
     _inherit = "stock.location"
 
@@ -43,9 +51,15 @@ class StockLocation(models.Model):
         return action
 
     @api.model
-    @tools.ormcache_context("location_id", keys=("excluded_location_domain",))
-    def _get_stock_domains(self, location_id):
+    @tools.ormcache_context("location_id", keys=("excluded_location_domain_cache_key",))
+    def _get_cached_stock_domains(self, location_id):
         return self.env["product.product"]._get_domain_locations_new(location_id)
+
+    def _get_stock_domains(self, location_id):
+        domain = self.env.context.get("excluded_location_domain", [])
+        return self.with_context(
+            excluded_location_domain_cache_key=make_hashable(domain)
+        )._get_cached_stock_domains(location_id)
 
     @api.model
     def _get_consuming_moves_domain(self, location_id):
@@ -75,7 +89,7 @@ class StockLocation(models.Model):
         return expression.AND([domain_move_in_loc, domain])
 
     def _clear_caches(self):
-        self._get_stock_domains.clear_cache(self)
+        self._get_cached_stock_domains.clear_cache(self)
 
     @api.model_create_multi
     def create(self, vals_list):
