@@ -261,16 +261,16 @@ class StockLocationOrderpoint(models.Model):
         return expression.AND([domain_move_in_loc, domain])
 
     @api.model
-    def _collect_products_by_orderpoint(self, moves, orderpoints, get_domain):
+    def _collect_products_by_orderpoint(self, moves, orderpoints, get_moves_domain):
         """Group impacted products by orderpoint using a domain provider."""
         products_by_orderpoint = defaultdict(self.env["product.product"].browse)
         for orderpoint in orderpoints:
-            moves_for_orderpoint = moves.filtered_domain(get_domain(orderpoint.id))
+            moves_for_orderpoint = moves.filtered_domain(
+                get_moves_domain(orderpoint.id)
+            )
             if not moves_for_orderpoint:
                 continue
-            products_by_orderpoint[orderpoint] |= moves_for_orderpoint.mapped(
-                "product_id"
-            )
+            products_by_orderpoint[orderpoint] |= moves_for_orderpoint.product_id
         return products_by_orderpoint
 
     @api.model
@@ -369,15 +369,20 @@ class StockLocationOrderpoint(models.Model):
         """
         self.ensure_one()
         computer = self.env["stock.location.replenishment.computer"].new(
-            {
-                "location_id": self.location_id.id,
-                "location_src_id": self.location_src_id.id,
-                "replenish_limit_to_free_qty": self.replenish_limit_to_free_qty,
-                "excluded_location_domain": self.stock_excluded_location_domain,
-            }
+            self._prepare_replenishment_computer_values()
         )
         computer._strategy = self._strategy_model
         return computer
+
+    def _prepare_replenishment_computer_values(self):
+        """Prepare the values to instantiate the replenishment computer."""
+        self.ensure_one()
+        return {
+            "location_id": self.location_id.id,
+            "location_src_id": self.location_src_id.id,
+            "replenish_limit_to_free_qty": self.replenish_limit_to_free_qty,
+            "excluded_location_domain": self.stock_excluded_location_domain,
+        }
 
     # -------------------------------------------------------------------------
     # Public triggers and orchestration
@@ -544,8 +549,8 @@ class StockLocationOrderpoint(models.Model):
         :return: product.product recordset or None
         """
         self.ensure_one()
-        return products or self._strategy_model._get_candidate_products(
-            self.location_id
+        return self._strategy_model._get_candidate_products(
+            self.location_id, products=products
         )
 
     def _build_procurements(self, procurement_data):

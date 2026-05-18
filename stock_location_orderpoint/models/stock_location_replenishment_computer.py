@@ -2,6 +2,7 @@
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 from odoo import _, fields, models
 from odoo.osv import expression
+from odoo.tools import float_compare
 
 
 class StockLocationReplenishmentComputer(models.TransientModel):
@@ -121,9 +122,10 @@ class StockLocationReplenishmentComputer(models.TransientModel):
         self.ensure_one()
         location = self.location_id
         if self.excluded_location_domain:
-            products = products.with_context(
-                excluded_location_domain=self.excluded_location_domain
-            )
+            if products is not None:
+                products = products.with_context(
+                    excluded_location_domain=self.excluded_location_domain
+                )
             location = location.with_context(
                 excluded_location_domain=self.excluded_location_domain
             )
@@ -150,11 +152,25 @@ class StockLocationReplenishmentComputer(models.TransientModel):
         product_ids = list(demand_data.keys())
         qty_available_data = self._compute_available_quantities(product_ids)
 
+        # prefetch product_ids for uom_id access in float_compare
+        self.env["product.product"].browse(qty_available_data.keys())
+
         result = {
-            product_id: min(
-                demand_data[product_id], qty_available_data.get(product_id, 0)
-            )
+            product_id: qty
             for product_id in demand_data
+            if (
+                qty := min(
+                    demand_data[product_id], qty_available_data.get(product_id, 0)
+                )
+            )
+            and float_compare(
+                qty,
+                0,
+                precision_rounding=self.env["product.product"]
+                .browse(product_id)
+                .uom_id.rounding,
+            )
+            == 1
         }
         if job_logs is not None:
             job_logs.append(
