@@ -124,6 +124,8 @@ class StockLocationOrderpointStrategyAverageDailyUsage(models.AbstractModel):
                 {stock_move_obj._table}.product_id,
                 SUM({stock_move_obj._table}.product_uom_qty) AS qty
             FROM {move_tables}
+            JOIN avg_daily_sale ON avg_daily_sale.product_id =
+                {stock_move_obj._table}.product_id
             WHERE {move_where}
             GROUP BY {stock_move_obj._table}.product_id
         """
@@ -149,6 +151,8 @@ class StockLocationOrderpointStrategyAverageDailyUsage(models.AbstractModel):
                 {stock_quant_obj._table}.product_id,
                 - SUM({stock_quant_obj._table}.quantity) AS qty
             FROM {quant_tables}
+            JOIN avg_daily_sale ON avg_daily_sale.product_id =
+                {stock_quant_obj._table}.product_id
             WHERE {quant_where}
             GROUP BY {stock_quant_obj._table}.product_id
         """
@@ -156,9 +160,10 @@ class StockLocationOrderpointStrategyAverageDailyUsage(models.AbstractModel):
         # --- FINAL UNION ---
 
         final_sql = f"""
+            WITH avg_daily_sale AS ({ads_sql})
             SELECT product_id, SUM(qty) AS qty
             FROM (
-                {ads_sql}
+                SELECT * FROM avg_daily_sale
                 UNION ALL
                 {move_sql}
                 UNION ALL
