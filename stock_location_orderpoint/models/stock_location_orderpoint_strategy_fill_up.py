@@ -21,7 +21,7 @@ class StockLocationOrderpointStrategyFillUp(models.AbstractModel):
         demand for this product at the destination location.
 
         :param location: stock.location record
-        :param horizon: dateime, time horizon to consider for the replenishment
+        :param horizon: datetime, time horizon to consider for the replenishment
         :param products: product.product recordset or None
 
         :return: product.product recordset
