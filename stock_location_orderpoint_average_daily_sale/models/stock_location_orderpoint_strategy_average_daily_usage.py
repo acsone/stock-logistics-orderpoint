@@ -78,39 +78,42 @@ class StockLocationOrderpointStrategyAverageDailyUsage(models.AbstractModel):
         )
         expression.expression(location_domain, stock_location_obj, loc_alias, ads_query)
 
-        # join config
-        stock_avg_cfg_obj = self.env["stock.average.daily.sale.config"]
-        avg_cfg_alias = ads_query.join(
-            stock_avg_daily_sale_obj._table,
-            "config_id",
-            stock_avg_cfg_obj._table,
-            "id",
-            "avg_cfg",
-        )
-
-        ads_tables, ads_where, ads_params = ads_query.get_sql()
-
-        ads_sql = f"""
-            SELECT
-                {stock_avg_daily_sale_obj._table}.product_id,
-                GREATEST(
-                    (
-                        (
-                            {avg_cfg_alias}.number_days_qty_in_stock
-                            *
-                            {stock_avg_daily_sale_obj._table}.average_daily_qty
-                        )
-                        +
-                        ({stock_avg_daily_sale_obj._table}.daily_standard_deviation
-                        * {avg_cfg_alias}.safety_factor
-                        * sqrt({avg_cfg_alias}.number_days_qty_in_stock))
-                    ),
-                    {avg_cfg_alias}.number_days_qty_in_stock
-                    * {stock_avg_daily_sale_obj._table}.average_qty_by_sale
-                ) AS qty
-            FROM {ads_tables}
+        # Retrieve candidate ADS records to compute recommended_qty via the ORM
+        ads_from, ads_where, ads_params = ads_query.get_sql()
+        ads_fetch_sql = f"""
+            SELECT {stock_avg_daily_sale_obj._table}.id
+            FROM {ads_from}
             WHERE {ads_where}
         """
+        self.env.cr.execute(ads_fetch_sql, ads_params)
+        ads_ids = [row[0] for row in self.env.cr.fetchall()]
+        if not ads_ids:
+            return {}
+
+        ads_records = stock_avg_daily_sale_obj.browse(ads_ids)
+
+        # Aggregate recommended quantities per product
+        product_recommended_qtys = {}
+        for rec in ads_records:
+            if rec.recommended_qty > 0.0:
+                product_recommended_qtys[rec.product_id.id] = (
+                    product_recommended_qtys.get(rec.product_id.id, 0.0)
+                    + rec.recommended_qty
+                )
+
+        if not product_recommended_qtys:
+            return {}
+
+        # Build dynamic VALUES clause for the avg_daily_sale CTE
+        ads_placeholders = ", ".join(
+            ["(%s::integer, %s::numeric)"] * len(product_recommended_qtys)
+        )
+        ads_sql = f"""
+            SELECT * FROM (VALUES {ads_placeholders}) AS t(product_id, qty)
+        """
+        ads_params = []
+        for product_id, product_qty in product_recommended_qtys.items():
+            ads_params.extend([product_id, product_qty])
 
         # --- STOCK MOVE (OUTGOING) with condition on products ---
         # --- for which we have an average daily sale at the location ---
